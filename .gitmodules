@@ -1,0 +1,3 @@
+[submodule "nvidia-ray-tracing-denoiser"]
+	path = nvidia-ray-tracing-denoiser
+	url = https://github.com/NVIDIAGameWorks/RayTracingDenoiser
