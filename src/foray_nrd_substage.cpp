@@ -2,16 +2,33 @@
 #include "foray_nrd.hpp"
 
 namespace foray::nrdd {
-    void NrdSubStage::Init(NrdDenoiser* nrdDenoiser, const nrd::PipelineDesc& desc)
+    void NrdSubStage::Init(NrdDenoiser* nrdDenoiser, const nrd::PipelineDesc& desc, VkDeviceSize constantsBufferSize)
     {
         Destroy();
         mContext      = nrdDenoiser->mContext;
         mNrdDenoiser  = nrdDenoiser;
         mPipelineDesc = desc;
 
+        VkBufferUsageFlags usage = VkBufferUsageFlagBits::VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VkBufferUsageFlagBits::VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+
+        core::ManagedBuffer::CreateInfo ci(usage, constantsBufferSize, VmaMemoryUsage::VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 0, "NRD Constants Buffer");
+        mConstantsBuffer.Create(mContext, ci);
+
         InitShader();
         CreateDescriptorSet();
         CreatePipelineLayout();
+
+
+        VkComputePipelineCreateInfo pipelineCi{
+            .sType  = VkStructureType::VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO,
+            .stage  = VkPipelineShaderStageCreateInfo{.sType  = VkStructureType::VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                                      .stage  = VkShaderStageFlagBits::VK_SHADER_STAGE_COMPUTE_BIT,
+                                                      .module = mShader,
+                                                      .pName  = mPipelineDesc.shaderEntryPointName},
+            .layout = mPipelineLayout,
+        };
+
+        vkCreateComputePipelines(mContext->Device(), nullptr, 1U, &pipelineCi, nullptr, &mPipeline);
     }
     void NrdSubStage::InitShader()
     {
@@ -22,12 +39,24 @@ namespace foray::nrdd {
     {
         std::vector<VkDescriptorSetLayoutBinding> bindings;
 
+        uint32_t numSampled = 0;
+        for(int32_t i = 0; i < mPipelineDesc.descriptorRangeNum; i++)
+        {
+            if (mPipelineDesc.descriptorRanges[i].descriptorType == nrd::DescriptorType::TEXTURE)
+            {
+                numSampled += mPipelineDesc.descriptorRanges[i].descriptorNum;
+            }
+        }
+        std::vector<VkSampler> samplers;
+        samplers.reserve(numSampled);
+        
+
         if(mPipelineDesc.hasConstantData)
         {
             bindings.push_back(VkDescriptorSetLayoutBinding{.binding         = NrdDenoiser::BIND_OFFSET_CONSTANTBUF,
                                                             .descriptorType  = VkDescriptorType::VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                                             .descriptorCount = 1U,
-                                                            .stageFlags      = VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT});
+                                                            .stageFlags      = VkShaderStageFlagBits::VK_SHADER_STAGE_COMPUTE_BIT});
         }
 
         uint32_t offsetStorage = NrdDenoiser::BIND_OFFSET_STORAGEIMG;
@@ -36,12 +65,14 @@ namespace foray::nrdd {
         {
             const nrd::DescriptorRangeDesc& desc = mPipelineDesc.descriptorRanges[i];
             VkDescriptorType                type;
-            uint32_t*                       offset = nullptr;
+            uint32_t*                       offset     = nullptr;
+            VkSampler*                      samplerArr = nullptr;
             switch(desc.descriptorType)
             {
                 case nrd::DescriptorType::TEXTURE:
-                    type   = VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                    offset = &offsetReadTex;
+                    type    = VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    offset  = &offsetReadTex;
+                    samplerArr = &samplers.emplace_back(mNrdDenoiser->mSamplers[desc.baseRegisterIndex].Ref.GetSampler());
                     break;
                 case nrd::DescriptorType::STORAGE_TEXTURE:
                     type   = VkDescriptorType::VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -54,8 +85,11 @@ namespace foray::nrdd {
             const nrd::DescriptorRangeDesc& range = mPipelineDesc.descriptorRanges[i];
             for(int32_t j = 0; j < range.descriptorNum; j++)
             {
-                bindings.push_back(VkDescriptorSetLayoutBinding{
-                    .binding = *offset, .descriptorType = type, .descriptorCount = 1U, .stageFlags = VkPipelineStageFlagBits::VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT});
+                bindings.push_back(VkDescriptorSetLayoutBinding{.binding            = *offset,
+                                                                .descriptorType     = type,
+                                                                .descriptorCount    = 1U,
+                                                                .stageFlags         = VkShaderStageFlagBits::VK_SHADER_STAGE_COMPUTE_BIT,
+                                                                .pImmutableSamplers = samplerArr});
                 *offset = *offset + 1;
             }
         }
@@ -81,7 +115,8 @@ namespace foray::nrdd {
 
         if(mPipelineDesc.hasConstantData)
         {
-            VkDescriptorBufferInfo bufInfo = mNrdDenoiser->mConstantsBuffer.GetVkDescriptorInfo();
+            // TODO use one constantsbuffer per dispatch
+            VkDescriptorBufferInfo bufInfo = mConstantsBuffer.GetVkDescriptorInfo();
 
             std::vector<VkWriteDescriptorSet> descriptorWrites(INFLIGHT_FRAME_COUNT);
 
@@ -109,14 +144,87 @@ namespace foray::nrdd {
 
     void NrdSubStage::RecordFrame(VkCommandBuffer cmdBuffer, base::FrameRenderInfo& renderInfo, const nrd::DispatchDesc& desc)
     {
+        uint32_t inFlightIdx = renderInfo.GetFrameNumber() % INFLIGHT_FRAME_COUNT;
+
+        std::vector<VkImageMemoryBarrier2> imageBarriers;
         {  // Update Descriptor Set
             std::vector<VkWriteDescriptorSet> descriptorWrites;
 
+            uint32_t  offsetStorage = NrdDenoiser::BIND_OFFSET_STORAGEIMG;
+            uint32_t  offsetReadTex = NrdDenoiser::BIND_OFFSET_TEXIMG;
+            uint32_t* offset        = nullptr;
+            for(size_t i = 0; i < desc.resourceNum; i++)
+            {
+                const nrd::Resource& resource = desc.resources[i];
+
+                VkDescriptorType      descriptorType;
+                VkDescriptorImageInfo imageInfo;
+
+                VkImage     image     = nullptr;
+                VkImageView imageView = nullptr;
+                mNrdDenoiser->ResolveImage(resource.type, resource.indexInPool, image, imageView);
+
+                switch(resource.stateNeeded)
+                {
+                    case nrd::DescriptorType::TEXTURE: {
+                        descriptorType = VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                        imageInfo      = VkDescriptorImageInfo{
+                                 .sampler     = nullptr,
+                                 .imageView   = imageView,
+                                 .imageLayout = VkImageLayout::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                        };
+                        core::ImageLayoutCache::Barrier2 barrier{.SrcStageMask  = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                                                 .SrcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                                                 .DstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                                                 .DstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT,
+                                                                 .NewLayout     = VkImageLayout::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+                        imageBarriers.push_back(renderInfo.GetImageLayoutCache().MakeBarrier(image, barrier));
+                        offset = &offsetReadTex;
+                        break;
+                    }
+                    case nrd::DescriptorType::STORAGE_TEXTURE: {
+                        descriptorType = VkDescriptorType::VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+                        imageInfo      = VkDescriptorImageInfo{
+                                 .sampler     = nullptr,
+                                 .imageView   = imageView,
+                                 .imageLayout = VkImageLayout::VK_IMAGE_LAYOUT_GENERAL,
+                        };
+                        core::ImageLayoutCache::Barrier2 barrier{.SrcStageMask  = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
+                                                                 .SrcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                                                 .DstStageMask  = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                                                                 .DstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
+                                                                 .NewLayout     = VkImageLayout::VK_IMAGE_LAYOUT_GENERAL};
+                        imageBarriers.push_back(renderInfo.GetImageLayoutCache().MakeBarrier(image, barrier));
+                        offset = &offsetStorage;
+                        break;
+                    }
+                    default:
+                        Exception::Throw("Unhandled DescriptorType Enum Value");
+                }
+
+                descriptorWrites.push_back(VkWriteDescriptorSet{
+                    .sType           = VkStructureType::VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                    .dstSet          = mDescriptorSets[inFlightIdx],
+                    .dstBinding      = *offset,
+                    .dstArrayElement = 0U,
+                    .descriptorCount = 1U,
+                    .descriptorType  = descriptorType,
+                    .pImageInfo      = &imageInfo,
+                });
+                *offset = *offset + 1;
+            }
 
 
             vkUpdateDescriptorSets(mContext->Device(), descriptorWrites.size(), descriptorWrites.data(), 0, nullptr);
         }
+        {  // Upload constant data
+
+            mConstantsBuffer.StageSection(renderInfo.GetFrameNumber(), desc.constantBufferData, 0U, desc.constantBufferDataSize);
+            mConstantsBuffer.CmdCopyToDevice(renderInfo.GetFrameNumber(), cmdBuffer);
+        }
         {  // Pipeline Barrier
+
+            mConstantsBuffer.CmdPrepareForRead(cmdBuffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_MEMORY_READ_BIT);
 
             VkMemoryBarrier2 memBarrier{
                 .sType         = VkStructureType::VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
@@ -126,15 +234,29 @@ namespace foray::nrdd {
                 .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
             };
 
-            VkDependencyInfo depInfo{.sType = VkStructureType::VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1U, .pMemoryBarriers = &memBarrier};
+            VkDependencyInfo depInfo{.sType                   = VkStructureType::VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+                                     .memoryBarrierCount      = 1U,
+                                     .pMemoryBarriers         = &memBarrier,
+                                     .imageMemoryBarrierCount = (uint32_t)imageBarriers.size(),
+                                     .pImageMemoryBarriers    = imageBarriers.data()};
 
             vkCmdPipelineBarrier2(cmdBuffer, &depInfo);
         }
+        {  // Bind descriptor & pipeline
+            vkCmdBindPipeline(cmdBuffer, VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE, mPipeline);
+            vkCmdBindDescriptorSets(cmdBuffer, VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE, mPipelineLayout, 0U, 1U, mDescriptorSets + inFlightIdx, 0, nullptr);
+        }
         {  // Dispatch
+            vkCmdDispatch(cmdBuffer, desc.gridWidth, desc.gridHeight, 1U);
         }
     }
     void NrdSubStage::Destroy()
     {
+        if(!!mPipeline)
+        {
+            vkDestroyPipeline(mContext->Device(), mPipeline, nullptr);
+            mPipeline = nullptr;
+        }
         mShader.Destroy();
         mPipelineLayout.Destroy();
         if(!!mDescriptorSetLayout)
@@ -142,6 +264,7 @@ namespace foray::nrdd {
             vkDestroyDescriptorSetLayout(mContext->Device(), mDescriptorSetLayout, nullptr);
             mDescriptorSetLayout = nullptr;
         }
+        mConstantsBuffer.Destroy();
     }
 
 }  // namespace foray::nrdd

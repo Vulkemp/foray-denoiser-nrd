@@ -30,12 +30,13 @@ namespace foray::nrdd {
 
         virtual void Destroy() override;
 
+        virtual void ResolveImage(nrd::ResourceType type, uint32_t index, VkImage& outImage, VkImageView& outView);
+
       protected:
         void InitSamplers();
         void InitPermanentImages();
         void InitTransientImages();
         void InitDescriptorPool();
-        void InitConstantsBuffer();
         void InitSubStages();
 
         static VkFormat sTranslateFormat(nrd::Format format);
@@ -60,8 +61,10 @@ namespace foray::nrdd {
 
         std::vector<Sampler> mSamplers;
 
+        std::unordered_map<nrd::ResourceType, core::ManagedImage*> mImageLookup;
+
         VkDescriptorPool mDescriptorPool = nullptr;
 
-        util::DualBuffer mConstantsBuffer;
+        bool mFirstFrameRendered = false;
     };
 }  // namespace foray::nrdd

@@ -3,6 +3,7 @@
 #include <core/foray_shadermodule.hpp>
 #include <stages/foray_renderstage.hpp>
 #include <util/foray_pipelinelayout.hpp>
+#include <util/foray_dualbuffer.hpp>
 
 namespace foray::nrdd {
     class NrdDenoiser;
@@ -10,7 +11,7 @@ namespace foray::nrdd {
     class NrdSubStage : public stages::RenderStage
     {
       public:
-        void Init(NrdDenoiser* nrdDenoiser, const nrd::PipelineDesc& desc);
+        void Init(NrdDenoiser* nrdDenoiser, const nrd::PipelineDesc& desc, VkDeviceSize constantsBufferSize);
 
         void RecordFrame(VkCommandBuffer cmdBuffer, base::FrameRenderInfo& renderInfo, const nrd::DispatchDesc& desc);
 
@@ -24,8 +25,11 @@ namespace foray::nrdd {
 
         core::ShaderModule    mShader;
         VkDescriptorSet       mDescriptorSets[INFLIGHT_FRAME_COUNT];
-        VkDescriptorSetLayout mDescriptorSetLayout;
+        VkDescriptorSetLayout mDescriptorSetLayout = nullptr;
         util::PipelineLayout  mPipelineLayout;
+        VkPipeline            mPipeline = nullptr;
+
+        util::DualBuffer mConstantsBuffer;
 
         void InitShader();
         void CreateDescriptorSet();

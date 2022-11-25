@@ -24,7 +24,6 @@ namespace foray::nrdd {
         InitPermanentImages();
         InitTransientImages();
         InitDescriptorPool();
-        InitConstantsBuffer();
         InitSubStages();
 
     }  // namespace foray::nrdd
@@ -246,33 +245,67 @@ namespace foray::nrdd {
 
         AssertVkResult(vkCreateDescriptorPool(mContext->Device(), &poolCi, nullptr, &mDescriptorPool));
     }
-    void NrdDenoiser::InitConstantsBuffer()
-    {
-        VkBufferUsageFlags usage = VkBufferUsageFlagBits::VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VkBufferUsageFlagBits::VK_BUFFER_USAGE_TRANSFER_DST_BIT;
-
-        core::ManagedBuffer::CreateInfo ci(usage, mDenoiserDescription.constantBufferDesc.maxDataSize, VmaMemoryUsage::VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 0, "NRD Constants Buffer");
-        mConstantsBuffer.Create(mContext, ci);
-    }
 
     void NrdDenoiser::InitSubStages()
     {
         mSubStages.resize(mDenoiserDescription.pipelineNum);
-        for (int32_t i = 0; i < mSubStages.size(); i++)
+        for(int32_t i = 0; i < mSubStages.size(); i++)
         {
             const nrd::PipelineDesc& desc = mDenoiserDescription.pipelines[i];
 
             mSubStages[i] = std::make_unique<NrdSubStage>();
-            mSubStages[i]->Init(this, desc);
+            mSubStages[i]->Init(this, desc, mDenoiserDescription.constantBufferDesc.maxDataSize);
         }
     }
 
     void NrdDenoiser::RecordFrame(VkCommandBuffer cmdBuffer, base::FrameRenderInfo& renderInfo)
     {
+        if(mFirstFrameRendered)
+        {
+            for(std::unique_ptr<core::ManagedImage>& image : mPermanentImages)
+            {
+                renderInfo.GetImageLayoutCache().Set(*image, VkImageLayout::VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+            }
+        }
+        mFirstFrameRendered = true;
+
         const nrd::DispatchDesc* dispatchDescriptions = nullptr;
 
         uint32_t dispatchCount = 0;
 
         AssertNrdResult(nrd::GetComputeDispatches(*mDenoiser, mSettings, dispatchDescriptions, dispatchCount));
+
+        for(int32_t i = 0; i < dispatchCount; i++)
+        {
+            const nrd::DispatchDesc& dispatchDesc = dispatchDescriptions[i];
+
+            mSubStages[dispatchDesc.pipelineIndex]->RecordFrame(cmdBuffer, renderInfo, dispatchDesc);
+        }
+
+        // TODO: Transfer all permanent images to shader read only
+    }
+    void NrdDenoiser::ResolveImage(nrd::ResourceType type, uint32_t index, VkImage& outImage, VkImageView& outView)
+    {
+        switch (type)
+        {
+            case nrd::ResourceType::PERMANENT_POOL:{
+                core::ManagedImage& image = *mPermanentImages[index];
+                outImage = image.GetImage();
+                outView = image.GetImageView();
+                break;
+            }
+            case nrd::ResourceType::TRANSIENT_POOL:{
+                core::ManagedImage& image = *mTransientImages[index];
+                outImage = image.GetImage();
+                outView = image.GetImageView();
+                break;
+            }
+            default:
+                core::ManagedImage& image = *mImageLookup[type];
+                outImage = image.GetImage();
+                outView = image.GetImageView();
+            break;
+        }
     }
     std::string NrdDenoiser::GetUILabel()
     {
@@ -294,11 +327,11 @@ namespace foray::nrdd {
         mSamplers.clear();
         mPermanentImages.clear();
         mTransientImages.clear();
-        if (!!mDescriptorPool)
+        if(!!mDescriptorPool)
         {
             vkDestroyDescriptorPool(mContext->Device(), mDescriptorPool, nullptr);
             mDescriptorPool = nullptr;
         }
-        mConstantsBuffer.Destroy();
+        mFirstFrameRendered = false;
     }
 }  // namespace foray::nrdd
