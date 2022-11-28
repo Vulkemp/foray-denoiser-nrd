@@ -15,6 +15,7 @@ namespace foray::nrdd {
         friend NrdSubStage;
 
       public:
+        inline static constexpr uint32_t BIND_OFFSET_SAMPLERS    = 100U;
         inline static constexpr uint32_t BIND_OFFSET_TEXIMG      = 200U;
         inline static constexpr uint32_t BIND_OFFSET_CONSTANTBUF = 300U;
         inline static constexpr uint32_t BIND_OFFSET_STORAGEIMG  = 400U;

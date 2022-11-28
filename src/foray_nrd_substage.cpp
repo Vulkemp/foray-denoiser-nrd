@@ -9,10 +9,13 @@ namespace foray::nrdd {
         mNrdDenoiser  = nrdDenoiser;
         mPipelineDesc = desc;
 
-        VkBufferUsageFlags usage = VkBufferUsageFlagBits::VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VkBufferUsageFlagBits::VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        if(mPipelineDesc.hasConstantData)
+        {
+            VkBufferUsageFlags usage = VkBufferUsageFlagBits::VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VkBufferUsageFlagBits::VK_BUFFER_USAGE_TRANSFER_DST_BIT;
 
-        core::ManagedBuffer::CreateInfo ci(usage, constantsBufferSize, VmaMemoryUsage::VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 0, "NRD Constants Buffer");
-        mConstantsBuffer.Create(mContext, ci);
+            core::ManagedBuffer::CreateInfo ci(usage, constantsBufferSize, VmaMemoryUsage::VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE, 0, "NRD Constants Buffer");
+            mConstantsBuffer.Create(mContext, ci);
+        }
 
         InitShader();
         CreateDescriptorSet();
@@ -39,17 +42,21 @@ namespace foray::nrdd {
     {
         std::vector<VkDescriptorSetLayoutBinding> bindings;
 
-        uint32_t numSampled = 0;
-        for(int32_t i = 0; i < mPipelineDesc.descriptorRangeNum; i++)
-        {
-            if (mPipelineDesc.descriptorRanges[i].descriptorType == nrd::DescriptorType::TEXTURE)
-            {
-                numSampled += mPipelineDesc.descriptorRanges[i].descriptorNum;
-            }
-        }
         std::vector<VkSampler> samplers;
-        samplers.reserve(numSampled);
-        
+        samplers.reserve(mNrdDenoiser->mSamplers.size());
+
+        uint32_t offset = NrdDenoiser::BIND_OFFSET_SAMPLERS;
+        for(const NrdDenoiser::Sampler& sampler : mNrdDenoiser->mSamplers)
+        {
+            samplers.push_back(sampler.Ref);
+            bindings.push_back(VkDescriptorSetLayoutBinding{.binding            = offset,
+                                                            .descriptorType     = VkDescriptorType::VK_DESCRIPTOR_TYPE_SAMPLER,
+                                                            .descriptorCount    = 1U,
+                                                            .stageFlags         = VkShaderStageFlagBits::VK_SHADER_STAGE_COMPUTE_BIT,
+                                                            .pImmutableSamplers = &samplers.back()});
+            offset++;
+        }
+
 
         if(mPipelineDesc.hasConstantData)
         {
@@ -70,9 +77,9 @@ namespace foray::nrdd {
             switch(desc.descriptorType)
             {
                 case nrd::DescriptorType::TEXTURE:
-                    type    = VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                    offset  = &offsetReadTex;
-                    samplerArr = &samplers.emplace_back(mNrdDenoiser->mSamplers[desc.baseRegisterIndex].Ref.GetSampler());
+                    type       = VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    offset     = &offsetReadTex;
+                    samplerArr = &samplers[desc.baseRegisterIndex];
                     break;
                 case nrd::DescriptorType::STORAGE_TEXTURE:
                     type   = VkDescriptorType::VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
@@ -217,14 +224,15 @@ namespace foray::nrdd {
 
             vkUpdateDescriptorSets(mContext->Device(), descriptorWrites.size(), descriptorWrites.data(), 0, nullptr);
         }
+        if(!!desc.constantBufferData && desc.constantBufferDataSize > 0)
         {  // Upload constant data
 
             mConstantsBuffer.StageSection(renderInfo.GetFrameNumber(), desc.constantBufferData, 0U, desc.constantBufferDataSize);
             mConstantsBuffer.CmdCopyToDevice(renderInfo.GetFrameNumber(), cmdBuffer);
+            mConstantsBuffer.CmdPrepareForRead(cmdBuffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_MEMORY_READ_BIT);
         }
         {  // Pipeline Barrier
 
-            mConstantsBuffer.CmdPrepareForRead(cmdBuffer, VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT, VK_ACCESS_2_MEMORY_READ_BIT);
 
             VkMemoryBarrier2 memBarrier{
                 .sType         = VkStructureType::VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,

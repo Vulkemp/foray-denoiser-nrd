@@ -279,6 +279,8 @@ namespace foray::nrdd {
         {
             const nrd::DispatchDesc& dispatchDesc = dispatchDescriptions[i];
 
+            logger()->info("Dispatch \"{}\" [{}]", dispatchDesc.name, dispatchDesc.pipelineIndex);
+
             mSubStages[dispatchDesc.pipelineIndex]->RecordFrame(cmdBuffer, renderInfo, dispatchDesc);
         }
 
