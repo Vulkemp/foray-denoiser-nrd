@@ -31,7 +31,7 @@ namespace foray::nrdd {
 
         virtual void Destroy() override;
 
-        virtual void ResolveImage(nrd::ResourceType type, uint32_t index, VkImage& outImage, VkImageView& outView);
+        virtual VkFormat ResolveImage(nrd::ResourceType type, uint32_t index, VkImage& outImage, VkImageView& outView);
 
       protected:
         void InitSamplers();

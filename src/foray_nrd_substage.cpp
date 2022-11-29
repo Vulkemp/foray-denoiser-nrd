@@ -1,5 +1,6 @@
 #include "foray_nrd_substage.hpp"
 #include "foray_nrd.hpp"
+#include <nameof/nameof.hpp>
 
 namespace foray::nrdd {
     void NrdSubStage::Init(NrdDenoiser* nrdDenoiser, const nrd::PipelineDesc& desc, VkDeviceSize constantsBufferSize)
@@ -77,7 +78,7 @@ namespace foray::nrdd {
             switch(desc.descriptorType)
             {
                 case nrd::DescriptorType::TEXTURE:
-                    type       = VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                    type       = VkDescriptorType::VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
                     offset     = &offsetReadTex;
                     samplerArr = &samplers[desc.baseRegisterIndex];
                     break;
@@ -92,6 +93,8 @@ namespace foray::nrdd {
             const nrd::DescriptorRangeDesc& range = mPipelineDesc.descriptorRanges[i];
             for(int32_t j = 0; j < range.descriptorNum; j++)
             {
+                // logger()->info("Layout [{}/{}] (baseReg {}) {} to {}", j, desc.descriptorNum, desc.baseRegisterIndex, NAMEOF_ENUM(desc.descriptorType), *offset);
+
                 bindings.push_back(VkDescriptorSetLayoutBinding{.binding            = *offset,
                                                                 .descriptorType     = type,
                                                                 .descriptorCount    = 1U,
@@ -99,49 +102,15 @@ namespace foray::nrdd {
                                                                 .pImmutableSamplers = samplerArr});
                 *offset = *offset + 1;
             }
+
         }
 
-        VkDescriptorSetLayoutCreateInfo layoutCi{
-            .sType = VkStructureType::VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = (uint32_t)bindings.size(), .pBindings = bindings.data()};
+        VkDescriptorSetLayoutCreateInfo layoutCi{.sType        = VkStructureType::VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+                                                 .flags        = VkDescriptorSetLayoutCreateFlagBits::VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+                                                 .bindingCount = (uint32_t)bindings.size(),
+                                                 .pBindings    = bindings.data()};
 
         AssertVkResult(vkCreateDescriptorSetLayout(mContext->Device(), &layoutCi, nullptr, &mDescriptorSetLayout));
-
-        VkDescriptorSetLayout layouts[INFLIGHT_FRAME_COUNT];
-
-        for(int32_t i = 0; i < INFLIGHT_FRAME_COUNT; i++)
-        {
-            layouts[i] = mDescriptorSetLayout;
-        }
-
-        VkDescriptorSetAllocateInfo allocInfo{.sType              = VkStructureType::VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
-                                              .descriptorPool     = mNrdDenoiser->mDescriptorPool,
-                                              .descriptorSetCount = INFLIGHT_FRAME_COUNT,
-                                              .pSetLayouts        = layouts};
-
-        AssertVkResult(vkAllocateDescriptorSets(mContext->Device(), &allocInfo, mDescriptorSets));
-
-        if(mPipelineDesc.hasConstantData)
-        {
-            // TODO use one constantsbuffer per dispatch
-            VkDescriptorBufferInfo bufInfo = mConstantsBuffer.GetVkDescriptorInfo();
-
-            std::vector<VkWriteDescriptorSet> descriptorWrites(INFLIGHT_FRAME_COUNT);
-
-            for(int32_t i = 0; i < INFLIGHT_FRAME_COUNT; i++)
-            {
-                descriptorWrites[i] = VkWriteDescriptorSet{
-                    .sType           = VkStructureType::VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                    .dstSet          = mDescriptorSets[i],
-                    .dstBinding      = NrdDenoiser::BIND_OFFSET_CONSTANTBUF,
-                    .descriptorCount = 1u,
-                    .descriptorType  = VkDescriptorType::VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-                    .pImageInfo      = nullptr,
-                    .pBufferInfo     = &bufInfo,
-                };
-            }
-
-            vkUpdateDescriptorSets(mContext->Device(), descriptorWrites.size(), descriptorWrites.data(), 0, nullptr);
-        }
     }
     void NrdSubStage::CreatePipelineLayout()
     {
@@ -152,6 +121,9 @@ namespace foray::nrdd {
     void NrdSubStage::RecordFrame(VkCommandBuffer cmdBuffer, base::FrameRenderInfo& renderInfo, const nrd::DispatchDesc& desc)
     {
         uint32_t inFlightIdx = renderInfo.GetFrameNumber() % INFLIGHT_FRAME_COUNT;
+        {  // Bind pipeline
+            vkCmdBindPipeline(cmdBuffer, VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE, mPipeline);
+        }
 
         std::vector<VkImageMemoryBarrier2> imageBarriers;
         {  // Update Descriptor Set
@@ -169,12 +141,12 @@ namespace foray::nrdd {
 
                 VkImage     image     = nullptr;
                 VkImageView imageView = nullptr;
-                mNrdDenoiser->ResolveImage(resource.type, resource.indexInPool, image, imageView);
+                VkFormat format = mNrdDenoiser->ResolveImage(resource.type, resource.indexInPool, image, imageView);
 
                 switch(resource.stateNeeded)
                 {
                     case nrd::DescriptorType::TEXTURE: {
-                        descriptorType = VkDescriptorType::VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                        descriptorType = VkDescriptorType::VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
                         imageInfo      = VkDescriptorImageInfo{
                                  .sampler     = nullptr,
                                  .imageView   = imageView,
@@ -209,9 +181,11 @@ namespace foray::nrdd {
                         Exception::Throw("Unhandled DescriptorType Enum Value");
                 }
 
+                logger()->info("Bind {}[{}](Format {}) as {} to {}", NAMEOF_ENUM(resource.type), resource.indexInPool, NAMEOF_ENUM(format), NAMEOF_ENUM(resource.stateNeeded), *offset);
+
                 descriptorWrites.push_back(VkWriteDescriptorSet{
                     .sType           = VkStructureType::VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
-                    .dstSet          = mDescriptorSets[inFlightIdx],
+                    .dstSet          = nullptr,
                     .dstBinding      = *offset,
                     .dstArrayElement = 0U,
                     .descriptorCount = 1U,
@@ -221,8 +195,23 @@ namespace foray::nrdd {
                 *offset = *offset + 1;
             }
 
+            if(mPipelineDesc.hasConstantData)
+            {
+                VkDescriptorBufferInfo bufInfo = mConstantsBuffer.GetVkDescriptorInfo();
 
-            vkUpdateDescriptorSets(mContext->Device(), descriptorWrites.size(), descriptorWrites.data(), 0, nullptr);
+                descriptorWrites.push_back(VkWriteDescriptorSet{
+                    .sType           = VkStructureType::VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+                    .dstSet          = nullptr,
+                    .dstBinding      = NrdDenoiser::BIND_OFFSET_CONSTANTBUF,
+                    .descriptorCount = 1u,
+                    .descriptorType  = VkDescriptorType::VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                    .pImageInfo      = nullptr,
+                    .pBufferInfo     = &bufInfo,
+                });
+            }
+
+            mContext->VkbDispatchTable->cmdPushDescriptorSetKHR(cmdBuffer, VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE, mPipelineLayout, 0, descriptorWrites.size(),
+                                                                descriptorWrites.data());
         }
         if(!!desc.constantBufferData && desc.constantBufferDataSize > 0)
         {  // Upload constant data
@@ -234,7 +223,7 @@ namespace foray::nrdd {
         {  // Pipeline Barrier
 
 
-            VkMemoryBarrier2 memBarrier{
+            VkMemoryBarrier2 memBarrier{ // TODO: Remove me (dummy full memory barrier)
                 .sType         = VkStructureType::VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
                 .srcStageMask  = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT,
                 .srcAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT,
@@ -249,10 +238,6 @@ namespace foray::nrdd {
                                      .pImageMemoryBarriers    = imageBarriers.data()};
 
             vkCmdPipelineBarrier2(cmdBuffer, &depInfo);
-        }
-        {  // Bind descriptor & pipeline
-            vkCmdBindPipeline(cmdBuffer, VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE, mPipeline);
-            vkCmdBindDescriptorSets(cmdBuffer, VkPipelineBindPoint::VK_PIPELINE_BIND_POINT_COMPUTE, mPipelineLayout, 0U, 1U, mDescriptorSets + inFlightIdx, 0, nullptr);
         }
         {  // Dispatch
             vkCmdDispatch(cmdBuffer, desc.gridWidth, desc.gridHeight, 1U);

@@ -24,7 +24,6 @@ namespace foray::nrdd {
         nrd::PipelineDesc mPipelineDesc = {};
 
         core::ShaderModule    mShader;
-        VkDescriptorSet       mDescriptorSets[INFLIGHT_FRAME_COUNT];
         VkDescriptorSetLayout mDescriptorSetLayout = nullptr;
         util::PipelineLayout  mPipelineLayout;
         VkPipeline            mPipeline = nullptr;

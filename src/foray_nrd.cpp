@@ -1,5 +1,6 @@
 #include "foray_nrd.hpp"
 #include "foray_nrd_helpers.hpp"
+#include <nameof/nameof.hpp>
 
 namespace foray::nrdd {
     void NrdDenoiser::Init(core::Context* context, const stages::DenoiserConfig& config)
@@ -25,6 +26,12 @@ namespace foray::nrdd {
         InitTransientImages();
         InitDescriptorPool();
         InitSubStages();
+
+        mImageLookup[nrd::ResourceType::OUT_DIFF_RADIANCE_HITDIST] = config.PrimaryOutput;
+        mImageLookup[nrd::ResourceType::IN_NORMAL_ROUGHNESS]       = config.GBufferOutputs[(size_t)stages::GBufferStage::EOutput::Normal];
+        mImageLookup[nrd::ResourceType::IN_VIEWZ]                  = config.GBufferOutputs[(size_t)stages::GBufferStage::EOutput::LinearZ];
+        mImageLookup[nrd::ResourceType::IN_DIFF_RADIANCE_HITDIST]  = config.PrimaryInput;
+        mImageLookup[nrd::ResourceType::IN_MV]                     = config.GBufferOutputs[(size_t)stages::GBufferStage::EOutput::Motion];
 
     }  // namespace foray::nrdd
 
@@ -106,7 +113,11 @@ namespace foray::nrdd {
 
             VkExtent2D size{desc.width, desc.height};
 
-            core::ManagedImage::CreateInfo ci(usage, sTranslateFormat(desc.format), size, fmt::format("NRD Perm #{}", i));
+            VkFormat format = sTranslateFormat(desc.format);
+
+            logger()->info("Permanent #{}: nrd::Format {}, VkFormat {}", i, NAMEOF_ENUM(desc.format), NAMEOF_ENUM(format));
+
+            core::ManagedImage::CreateInfo ci(usage, format, size, fmt::format("NRD Perm #{}", i));
             Assert(desc.mipNum == 1, "Support only for single mip level images atm (due to requiring multiple VkImageViews)");
             // ci.ImageCI.mipLevels                       = desc.mipNum;
             // ci.ImageViewCI.subresourceRange.levelCount = desc.mipNum;
@@ -127,7 +138,11 @@ namespace foray::nrdd {
 
             VkExtent2D size{desc.width, desc.height};
 
-            core::ManagedImage::CreateInfo ci(usage, sTranslateFormat(desc.format), size, fmt::format("NRD Perm #{}", i));
+            VkFormat format = sTranslateFormat(desc.format);
+
+            logger()->info("Transient #{}: nrd::Format {}, VkFormat {}", i, NAMEOF_ENUM(desc.format), NAMEOF_ENUM(format));
+
+            core::ManagedImage::CreateInfo ci(usage, format, size, fmt::format("NRD Transient #{}", i));
             ci.ImageCI.mipLevels                       = desc.mipNum;
             ci.ImageViewCI.subresourceRange.levelCount = desc.mipNum;
 
@@ -286,27 +301,35 @@ namespace foray::nrdd {
 
         // TODO: Transfer all permanent images to shader read only
     }
-    void NrdDenoiser::ResolveImage(nrd::ResourceType type, uint32_t index, VkImage& outImage, VkImageView& outView)
+    VkFormat NrdDenoiser::ResolveImage(nrd::ResourceType type, uint32_t index, VkImage& outImage, VkImageView& outView)
     {
-        switch (type)
+        switch(type)
         {
-            case nrd::ResourceType::PERMANENT_POOL:{
+            case nrd::ResourceType::PERMANENT_POOL: {
                 core::ManagedImage& image = *mPermanentImages[index];
-                outImage = image.GetImage();
-                outView = image.GetImageView();
+                outImage                  = image.GetImage();
+                outView                   = image.GetImageView();
+                return image.GetFormat();
                 break;
             }
-            case nrd::ResourceType::TRANSIENT_POOL:{
+            case nrd::ResourceType::TRANSIENT_POOL: {
                 core::ManagedImage& image = *mTransientImages[index];
-                outImage = image.GetImage();
-                outView = image.GetImageView();
+                outImage                  = image.GetImage();
+                outView                   = image.GetImageView();
+                return image.GetFormat();
                 break;
             }
-            default:
+            default: {
+                if(!mImageLookup.contains(type))
+                {
+                    FORAY_THROWFMT("Missing Resource {}!", NAMEOF_ENUM(type))
+                }
                 core::ManagedImage& image = *mImageLookup[type];
-                outImage = image.GetImage();
-                outView = image.GetImageView();
-            break;
+                outImage                  = image.GetImage();
+                outView                   = image.GetImageView();
+                return image.GetFormat();
+                break;
+            }
         }
     }
     std::string NrdDenoiser::GetUILabel()
