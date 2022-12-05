@@ -339,7 +339,6 @@ namespace foray::nrdd {
     }
     void NrdDenoiser::DisplayImguiConfiguration() {}
     void NrdDenoiser::IgnoreHistoryNextFrame() {}
-    void NrdDenoiser::OnShadersRecompiled() {}
     void NrdDenoiser::Resize(const VkExtent2D& size) {}
     void NrdDenoiser::Destroy()
     {

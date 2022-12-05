@@ -25,7 +25,6 @@ namespace foray::nrdd {
         virtual std::string GetUILabel() override;
         virtual void        DisplayImguiConfiguration() override;
         virtual void        IgnoreHistoryNextFrame() override;
-        virtual void        OnShadersRecompiled() override;
 
         virtual void Resize(const VkExtent2D& size) override;
 
